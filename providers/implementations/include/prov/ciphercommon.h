@@ -85,7 +85,7 @@ struct prov_cipher_ctx_st {
      * num contains the number of bytes of |iv| which are valid for modes that
      * manage partial blocks themselves.
      */
-    unsigned int num;
+    unsigned long num;
 
     /* The original value of the iv */
     unsigned char oiv[GENERIC_BLOCK_SIZE];
