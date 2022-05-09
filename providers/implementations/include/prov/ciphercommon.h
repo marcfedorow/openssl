@@ -88,10 +88,10 @@ struct prov_cipher_ctx_st {
     unsigned int num;
 
     /* The original value of the iv */
-    unsigned char oiv[GENERIC_BLOCK_SIZE];
+    unsigned char oiv[GENERIC_BLOCK_SIZE] __attribute__ ((aligned (GENERIC_BLOCK_SIZE)));
     /* Buffer of partial blocks processed via update calls */
-    unsigned char buf[GENERIC_BLOCK_SIZE];
-    unsigned char iv[GENERIC_BLOCK_SIZE];
+    unsigned char buf[GENERIC_BLOCK_SIZE] __attribute__ ((aligned (GENERIC_BLOCK_SIZE)));
+    unsigned char iv[GENERIC_BLOCK_SIZE] __attribute__ ((aligned (GENERIC_BLOCK_SIZE)));
     const PROV_CIPHER_HW *hw; /* hardware specific functions */
     const void *ks; /* Pointer to algorithm specific key data */
     OSSL_LIB_CTX *libctx;
