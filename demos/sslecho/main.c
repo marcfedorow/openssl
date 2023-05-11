@@ -14,6 +14,7 @@
 #include <arpa/inet.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <signal.h>
 
 static const int server_port = 4433;
 
@@ -123,7 +124,7 @@ void usage()
     printf("       --or--\n");
     printf("       sslecho c ip\n");
     printf("       c=client, s=server, ip=dotted ip of server\n");
-    exit(1);
+    exit(EXIT_FAILURE);
 }
 
 int main(int argc, char **argv)
@@ -150,6 +151,9 @@ int main(int argc, char **argv)
 
     struct sockaddr_in addr;
     unsigned int addr_len = sizeof(addr);
+
+    /* ignore SIGPIPE so that server can continue running when client pipe closes abruptly */
+    signal(SIGPIPE, SIG_IGN);
 
     /* Splash */
     printf("\nsslecho : Simple Echo Client/Server (OpenSSL 3.0.1-dev) : %s : %s\n\n", __DATE__,
@@ -218,6 +222,8 @@ int main(int argc, char **argv)
                     if ((rxlen = SSL_read(ssl, rxbuf, rxcap)) <= 0) {
                         if (rxlen == 0) {
                             printf("Client closed connection\n");
+                        } else {
+                            printf("SSL_read returned %d\n", rxlen);
                         }
                         ERR_print_errors_fp(stderr);
                         break;
@@ -273,7 +279,7 @@ int main(int argc, char **argv)
         /* Create client SSL structure using dedicated client socket */
         ssl = SSL_new(ssl_ctx);
         SSL_set_fd(ssl, client_skt);
-        /* Set host name for SNI */
+        /* Set hostname for SNI */
         SSL_set_tlsext_host_name(ssl, rem_server_ip);
         /* Configure server hostname check */
         SSL_set1_host(ssl, rem_server_ip);
@@ -322,7 +328,7 @@ int main(int argc, char **argv)
             ERR_print_errors_fp(stderr);
         }
     }
-    exit:
+exit:
     /* Close up */
     if (ssl != NULL) {
         SSL_shutdown(ssl);
@@ -340,5 +346,5 @@ int main(int argc, char **argv)
 
     printf("sslecho exiting\n");
 
-    return 0;
+    return EXIT_SUCCESS;
 }

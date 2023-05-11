@@ -107,7 +107,8 @@ static int execute_rr_create_test(CMP_MSG_TEST_FIXTURE *fixture)
 static int execute_certconf_create_test(CMP_MSG_TEST_FIXTURE *fixture)
 {
     EXECUTE_MSG_CREATION_TEST(ossl_cmp_certConf_new
-                              (fixture->cmp_ctx, fixture->fail_info, NULL));
+                              (fixture->cmp_ctx, OSSL_CMP_CERTREQID,
+                               fixture->fail_info, NULL));
 }
 
 static int execute_genm_create_test(CMP_MSG_TEST_FIXTURE *fixture)
@@ -338,7 +339,6 @@ static int test_cmp_create_error_msg(void)
     return result;
 }
 
-
 static int test_cmp_create_pollreq(void)
 {
     SETUP_TEST_FIXTURE(CMP_MSG_TEST_FIXTURE, set_up);
@@ -423,7 +423,6 @@ static int test_cmp_create_certrep(void)
     EXECUTE_TEST(execute_certrep_create, tear_down);
     return result;
 }
-
 
 static int execute_rp_create(CMP_MSG_TEST_FIXTURE *fixture)
 {
@@ -541,6 +540,8 @@ void cleanup_tests(void)
 {
     EVP_PKEY_free(newkey);
     X509_free(cert);
+    OSSL_PROVIDER_unload(default_null_provider);
+    OSSL_PROVIDER_unload(provider);
     OSSL_LIB_CTX_free(libctx);
 }
 

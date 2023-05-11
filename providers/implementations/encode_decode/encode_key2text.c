@@ -664,7 +664,7 @@ static int rsa_to_text(BIO *out, const void *key, int selection)
     coeffs = sk_BIGNUM_const_new_null();
 
     if (factors == NULL || exps == NULL || coeffs == NULL) {
-        ERR_raise(ERR_LIB_PROV, ERR_R_MALLOC_FAILURE);
+        ERR_raise(ERR_LIB_PROV, ERR_R_CRYPTO_LIB);
         goto err;
     }
 
@@ -867,7 +867,7 @@ static int key2text_encode(void *vctx, const void *key, int selection,
           (void (*)(void))impl##2text_free_object },                    \
         { OSSL_FUNC_ENCODER_ENCODE,                                     \
           (void (*)(void))impl##2text_encode },                         \
-        { 0, NULL }                                                     \
+        OSSL_DISPATCH_END                                               \
     }
 
 #ifndef OPENSSL_NO_DH

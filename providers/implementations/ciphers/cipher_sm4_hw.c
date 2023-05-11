@@ -7,6 +7,7 @@
  * https://www.openssl.org/source/license.html
  */
 
+#include <openssl/proverr.h>
 #include "cipher_sm4.h"
 
 static int cipher_hw_sm4_initkey(PROV_CIPHER_CTX *ctx,
@@ -42,6 +43,19 @@ static int cipher_hw_sm4_initkey(PROV_CIPHER_CTX *ctx,
             (void)0;            /* terminate potentially open 'else' */
         } else
 #endif
+#ifdef VPSM4_EX_CAPABLE
+        if (VPSM4_EX_CAPABLE) {
+            vpsm4_ex_set_encrypt_key(key, ks);
+            ctx->block = (block128_f)vpsm4_ex_encrypt;
+            ctx->stream.cbc = NULL;
+            if (ctx->mode == EVP_CIPH_CBC_MODE)
+                ctx->stream.cbc = (cbc128_f)vpsm4_ex_cbc_encrypt;
+            else if (ctx->mode == EVP_CIPH_ECB_MODE)
+                ctx->stream.ecb = (ecb128_f)vpsm4_ex_ecb_encrypt;
+            else if (ctx->mode == EVP_CIPH_CTR_MODE)
+                ctx->stream.ctr = (ctr128_f)vpsm4_ex_ctr32_encrypt_blocks;
+        } else
+#endif
 #ifdef VPSM4_CAPABLE
         if (VPSM4_CAPABLE) {
             vpsm4_set_encrypt_key(key, ks);
@@ -75,6 +89,17 @@ static int cipher_hw_sm4_initkey(PROV_CIPHER_CTX *ctx,
 #endif
         } else
 #endif
+#ifdef VPSM4_EX_CAPABLE
+        if (VPSM4_EX_CAPABLE) {
+            vpsm4_ex_set_decrypt_key(key, ks);
+            ctx->block = (block128_f)vpsm4_ex_decrypt;
+            ctx->stream.cbc = NULL;
+            if (ctx->mode == EVP_CIPH_CBC_MODE)
+                ctx->stream.cbc = (cbc128_f)vpsm4_ex_cbc_encrypt;
+            else if (ctx->mode == EVP_CIPH_ECB_MODE)
+                ctx->stream.ecb = (ecb128_f)vpsm4_ex_ecb_encrypt;
+        } else
+#endif
 #ifdef VPSM4_CAPABLE
         if (VPSM4_CAPABLE) {
             vpsm4_set_decrypt_key(key, ks);
@@ -82,7 +107,7 @@ static int cipher_hw_sm4_initkey(PROV_CIPHER_CTX *ctx,
             ctx->stream.cbc = NULL;
             if (ctx->mode == EVP_CIPH_CBC_MODE)
                 ctx->stream.cbc = (cbc128_f)vpsm4_cbc_encrypt;
-        else if (ctx->mode == EVP_CIPH_ECB_MODE)
+            else if (ctx->mode == EVP_CIPH_ECB_MODE)
                 ctx->stream.ecb = (ecb128_f)vpsm4_ecb_encrypt;
         } else
 #endif
@@ -103,10 +128,20 @@ static const PROV_CIPHER_HW sm4_##mode = {                                     \
     ossl_cipher_hw_generic_##mode,                                             \
     cipher_hw_sm4_copyctx                                                      \
 };                                                                             \
+PROV_CIPHER_HW_declare(mode)                                                   \
 const PROV_CIPHER_HW *ossl_prov_cipher_hw_sm4_##mode(size_t keybits)           \
 {                                                                              \
+    PROV_CIPHER_HW_select(mode)                                                \
     return &sm4_##mode;                                                        \
 }
+
+#if defined(RVI_ZKSED_CAPABLE)
+# include "cipher_sm4_hw_rvi_zksed.inc"
+#else
+/* The generic case */
+# define PROV_CIPHER_HW_declare(mode)
+# define PROV_CIPHER_HW_select(mode)
+#endif
 
 PROV_CIPHER_HW_sm4_mode(cbc)
 PROV_CIPHER_HW_sm4_mode(ecb)

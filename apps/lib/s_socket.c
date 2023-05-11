@@ -56,7 +56,7 @@ BIO_ADDR *ourpeer = NULL;
 /*
  * init_client - helper routine to set up socket communication
  * @sock: pointer to storage of resulting socket.
- * @host: the host name or path (for AF_UNIX) to connect to.
+ * @host: the hostname or path (for AF_UNIX) to connect to.
  * @port: the port to connect to (ignored for AF_UNIX).
  * @bindhost: source host or path (for AF_UNIX).
  * @bindport: source port (ignored for AF_UNIX).
@@ -65,7 +65,8 @@ BIO_ADDR *ourpeer = NULL;
  * @type: socket type, must be SOCK_STREAM or SOCK_DGRAM
  * @protocol: socket protocol, e.g. IPPROTO_TCP or IPPROTO_UDP (or 0 for any)
  * @tfo: flag to enable TCP Fast Open
- * @ba_ret: BIO_ADDR that was connected to for TFO, to be freed by caller
+ * @doconn: whether we should call BIO_connect() on the socket
+ * @ba_ret: BIO_ADDR for the remote peer, to be freed by caller
  *
  * This will create a socket and use it to connect to a host:port, or if
  * family == AF_UNIX, to the path found in host.
@@ -78,7 +79,7 @@ BIO_ADDR *ourpeer = NULL;
  */
 int init_client(int *sock, const char *host, const char *port,
                 const char *bindhost, const char *bindport,
-                int family, int type, int protocol, int tfo,
+                int family, int type, int protocol, int tfo, int doconn,
                 BIO_ADDR **ba_ret)
 {
     BIO_ADDRINFO *res = NULL;
@@ -173,14 +174,14 @@ int init_client(int *sock, const char *host, const char *port,
                 options |= BIO_SOCK_TFO;
         }
 
-        if (!BIO_connect(*sock, BIO_ADDRINFO_address(ai), options)) {
+        if (doconn && !BIO_connect(*sock, BIO_ADDRINFO_address(ai), options)) {
             BIO_closesocket(*sock);
             *sock = INVALID_SOCKET;
             continue;
         }
 
         /* Save the address */
-        if (tfo && ba_ret != NULL)
+        if (tfo || !doconn)
             *ba_ret = BIO_ADDR_dup(BIO_ADDRINFO_address(ai));
 
         /* Success, don't try any more addresses */
@@ -274,7 +275,7 @@ int report_server_accept(BIO *out, int asock, int with_address, int with_pid)
 /*
  * do_server - helper routine to perform a server operation
  * @accept_sock: pointer to storage of resulting socket.
- * @host: the host name or path (for AF_UNIX) to connect to.
+ * @host: the hostname or path (for AF_UNIX) to connect to.
  * @port: the port to connect to (ignored for AF_UNIX).
  * @family: desired socket family, may be AF_INET, AF_INET6, AF_UNIX or
  *  AF_UNSPEC

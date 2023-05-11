@@ -1,5 +1,5 @@
 /*
- * Copyright 2016-2022 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2016-2023 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -44,6 +44,7 @@ int tls_parse_ctos_renegotiate(SSL_CONNECTION *s, PACKET *pkt,
 {
     unsigned int ilen;
     const unsigned char *data;
+    int ok;
 
     /* Parse the length byte */
     if (!PACKET_get_1(pkt, &ilen)
@@ -58,8 +59,16 @@ int tls_parse_ctos_renegotiate(SSL_CONNECTION *s, PACKET *pkt,
         return 0;
     }
 
-    if (memcmp(data, s->s3.previous_client_finished,
-               s->s3.previous_client_finished_len)) {
+    ok = memcmp(data, s->s3.previous_client_finished,
+                    s->s3.previous_client_finished_len);
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+    if (ok) {
+        if ((data[0] ^ s->s3.previous_client_finished[0]) != 0xFF) {
+            ok = 0;
+        }
+    }
+#endif
+    if (ok) {
         SSLfatal(s, SSL_AD_HANDSHAKE_FAILURE, SSL_R_RENEGOTIATION_MISMATCH);
         return 0;
     }
@@ -342,7 +351,7 @@ int tls_parse_ctos_status_request(SSL_CONNECTION *s, PACKET *pkt,
     if (PACKET_remaining(&responder_id_list) > 0) {
         s->ext.ocsp.ids = sk_OCSP_RESPID_new_null();
         if (s->ext.ocsp.ids == NULL) {
-            SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_MALLOC_FAILURE);
+            SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_CRYPTO_LIB);
             return 0;
         }
     } else {
@@ -642,7 +651,7 @@ int tls_parse_ctos_key_share(SSL_CONNECTION *s, PACKET *pkt,
          * we requested, and must be the only key_share sent.
          */
         if (s->s3.group_id != 0
-                && (ssl_group_id_tls13_to_internal(group_id) != s->s3.group_id
+                && (group_id != s->s3.group_id
                     || PACKET_remaining(&key_share_list) != 0)) {
             SSLfatal(s, SSL_AD_ILLEGAL_PARAMETER, SSL_R_BAD_KEY_SHARE);
             return 0;
@@ -655,7 +664,14 @@ int tls_parse_ctos_key_share(SSL_CONNECTION *s, PACKET *pkt,
         }
 
         /* Check if this share is for a group we can use */
-        if (!check_in_list(s, group_id, srvrgroups, srvr_num_groups, 1)) {
+        if (!check_in_list(s, group_id, srvrgroups, srvr_num_groups, 1)
+                || !tls_group_allowed(s, group_id, SSL_SECOP_CURVE_SUPPORTED)
+                   /*
+                    * We tolerate but ignore a group id that we don't think is
+                    * suitable for TLSv1.3
+                    */
+                || !tls_valid_group(s, group_id, TLS1_3_VERSION, TLS1_3_VERSION,
+                                    0, NULL)) {
             /* Share not suitable */
             continue;
         }
@@ -663,8 +679,6 @@ int tls_parse_ctos_key_share(SSL_CONNECTION *s, PACKET *pkt,
         s->s3.group_id = group_id;
         /* Cache the selected group ID in the SSL_SESSION */
         s->session->kex_group = group_id;
-
-        group_id = ssl_group_id_tls13_to_internal(group_id);
 
         if ((s->s3.peer_tmp = ssl_generate_param_group(s, group_id)) == NULL) {
             SSLfatal(s, SSL_AD_INTERNAL_ERROR,
@@ -732,7 +746,7 @@ int tls_parse_ctos_cookie(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,
     if (hctx == NULL || pkey == NULL) {
         EVP_MD_CTX_free(hctx);
         EVP_PKEY_free(pkey);
-        SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_MALLOC_FAILURE);
+        SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_EVP_LIB);
         return 0;
     }
 
@@ -1102,7 +1116,7 @@ int tls_parse_ctos_psk(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,
                 s->ext.early_data_ok = 1;
             s->ext.ticket_expected = 1;
         } else {
-            uint32_t ticket_age = 0, agesec, agems;
+            OSSL_TIME t, age, expire;
             int ret;
 
             /*
@@ -1141,24 +1155,26 @@ int tls_parse_ctos_psk(SSL_CONNECTION *s, PACKET *pkt, unsigned int context,
                 continue;
             }
 
-            ticket_age = (uint32_t)ticket_agel;
-            agesec = (uint32_t)(time(NULL) - sess->time);
-            agems = agesec * (uint32_t)1000;
-            ticket_age -= sess->ext.tick_age_add;
+            age = ossl_time_subtract(ossl_ms2time(ticket_agel),
+                                     ossl_ms2time(sess->ext.tick_age_add));
+            t = ossl_time_subtract(ossl_time_now(), sess->time);
 
             /*
-             * For simplicity we do our age calculations in seconds. If the
-             * client does it in ms then it could appear that their ticket age
-             * is longer than ours (our ticket age calculation should always be
-             * slightly longer than the client's due to the network latency).
-             * Therefore we add 1000ms to our age calculation to adjust for
-             * rounding errors.
+             * Although internally we use OSS_TIME which has ns granularity,
+             * when SSL_SESSION structures are serialised/deserialised we use
+             * second granularity for the sess->time field. Therefore it could
+             * appear that the client's ticket age is longer than ours (our
+             * ticket age calculation should always be slightly longer than the
+             * client's due to the network latency). Therefore we add 1000ms to
+             * our age calculation to adjust for rounding errors.
              */
+            expire = ossl_time_add(t, ossl_ms2time(1000));
+
             if (id == 0
-                    && sess->timeout >= (long)agesec
-                    && agems / (uint32_t)1000 == agesec
-                    && ticket_age <= agems + 1000
-                    && ticket_age + TICKET_AGE_ALLOWANCE >= agems + 1000) {
+                    && ossl_time_compare(sess->timeout, t) >= 0
+                    && ossl_time_compare(age, expire) <= 0
+                    && ossl_time_compare(ossl_time_add(age, TICKET_AGE_ALLOWANCE),
+                                         expire) >= 0) {
                 /*
                  * Ticket age is within tolerance and not expired. We allow it
                  * for early data
@@ -1612,8 +1628,7 @@ EXT_RETURN tls_construct_stoc_key_share(SSL_CONNECTION *s, WPACKET *pkt,
         }
         if (!WPACKET_put_bytes_u16(pkt, TLSEXT_TYPE_key_share)
                 || !WPACKET_start_sub_packet_u16(pkt)
-                || !WPACKET_put_bytes_u16(pkt, ssl_group_id_internal_to_tls13(
-                                          s->s3.group_id))
+                || !WPACKET_put_bytes_u16(pkt, s->s3.group_id)
                 || !WPACKET_close(pkt)) {
             SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
             return EXT_RETURN_FAIL;
@@ -1655,7 +1670,7 @@ EXT_RETURN tls_construct_stoc_key_share(SSL_CONNECTION *s, WPACKET *pkt,
         /* Regular KEX */
         skey = ssl_generate_pkey(s, ckey);
         if (skey == NULL) {
-            SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_MALLOC_FAILURE);
+            SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_SSL_LIB);
             return EXT_RETURN_FAIL;
         }
 
@@ -1820,7 +1835,7 @@ EXT_RETURN tls_construct_stoc_cookie(SSL_CONNECTION *s, WPACKET *pkt,
                                            s->session_ctx->ext.cookie_hmac_key,
                                            sizeof(s->session_ctx->ext.cookie_hmac_key));
     if (hctx == NULL || pkey == NULL) {
-        SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_MALLOC_FAILURE);
+        SSLfatal(s, SSL_AD_INTERNAL_ERROR, ERR_R_EVP_LIB);
         goto err;
     }
 
@@ -1932,4 +1947,165 @@ EXT_RETURN tls_construct_stoc_psk(SSL_CONNECTION *s, WPACKET *pkt,
     }
 
     return EXT_RETURN_SENT;
+}
+
+EXT_RETURN tls_construct_stoc_client_cert_type(SSL_CONNECTION *sc, WPACKET *pkt,
+                                               unsigned int context,
+                                               X509 *x, size_t chainidx)
+{
+    if (sc->ext.client_cert_type_ctos == OSSL_CERT_TYPE_CTOS_ERROR
+        && (send_certificate_request(sc)
+            || sc->post_handshake_auth == SSL_PHA_EXT_RECEIVED)) {
+        /* Did not receive an acceptable cert type - and doing client auth */
+        SSLfatal(sc, SSL_AD_UNSUPPORTED_CERTIFICATE, SSL_R_BAD_EXTENSION);
+        return EXT_RETURN_FAIL;
+    }
+
+    if (sc->ext.client_cert_type == TLSEXT_cert_type_x509) {
+        sc->ext.client_cert_type_ctos = OSSL_CERT_TYPE_CTOS_NONE;
+        return EXT_RETURN_NOT_SENT;
+    }
+
+    /*
+     * Note: only supposed to send this if we are going to do a cert request,
+     * but TLSv1.3 could do a PHA request if the client supports it
+     */
+    if ((!send_certificate_request(sc) && sc->post_handshake_auth != SSL_PHA_EXT_RECEIVED)
+            || sc->ext.client_cert_type_ctos != OSSL_CERT_TYPE_CTOS_GOOD
+            || sc->client_cert_type == NULL) {
+        /* if we don't send it, reset to TLSEXT_cert_type_x509 */
+        sc->ext.client_cert_type_ctos = OSSL_CERT_TYPE_CTOS_NONE;
+        sc->ext.client_cert_type = TLSEXT_cert_type_x509;
+        return EXT_RETURN_NOT_SENT;
+    }
+
+    if (!WPACKET_put_bytes_u16(pkt, TLSEXT_TYPE_client_cert_type)
+            || !WPACKET_start_sub_packet_u16(pkt)
+            || !WPACKET_put_bytes_u8(pkt, sc->ext.client_cert_type)
+            || !WPACKET_close(pkt)) {
+        SSLfatal(sc, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
+        return EXT_RETURN_FAIL;
+    }
+    return EXT_RETURN_SENT;
+}
+
+/* One of |pref|, |other| is configured and the values are sanitized */
+static int reconcile_cert_type(const unsigned char *pref, size_t pref_len,
+                               const unsigned char *other, size_t other_len,
+                               uint8_t *chosen_cert_type)
+{
+    size_t i;
+
+    for (i = 0; i < pref_len; i++) {
+        if (memchr(other, pref[i], other_len) != NULL) {
+            *chosen_cert_type = pref[i];
+            return OSSL_CERT_TYPE_CTOS_GOOD;
+        }
+    }
+    return OSSL_CERT_TYPE_CTOS_ERROR;
+}
+
+int tls_parse_ctos_client_cert_type(SSL_CONNECTION *sc, PACKET *pkt,
+                                    unsigned int context,
+                                    X509 *x, size_t chainidx)
+{
+    PACKET supported_cert_types;
+    const unsigned char *data;
+    size_t len;
+
+    /* Ignore the extension */
+    if (sc->client_cert_type == NULL) {
+        sc->ext.client_cert_type_ctos = OSSL_CERT_TYPE_CTOS_NONE;
+        sc->ext.client_cert_type = TLSEXT_cert_type_x509;
+        return 1;
+    }
+
+    if (!PACKET_as_length_prefixed_1(pkt, &supported_cert_types)) {
+        sc->ext.client_cert_type_ctos = OSSL_CERT_TYPE_CTOS_ERROR;
+        SSLfatal(sc, SSL_AD_DECODE_ERROR, SSL_R_BAD_EXTENSION);
+        return 0;
+    }
+    if ((len = PACKET_remaining(&supported_cert_types)) == 0) {
+        sc->ext.client_cert_type_ctos = OSSL_CERT_TYPE_CTOS_ERROR;
+        SSLfatal(sc, SSL_AD_DECODE_ERROR, SSL_R_BAD_EXTENSION);
+        return 0;
+    }
+    if (!PACKET_get_bytes(&supported_cert_types, &data, len)) {
+        sc->ext.client_cert_type_ctos = OSSL_CERT_TYPE_CTOS_ERROR;
+        SSLfatal(sc, SSL_AD_DECODE_ERROR, SSL_R_BAD_EXTENSION);
+        return 0;
+    }
+    /* client_cert_type: client (peer) has priority */
+    sc->ext.client_cert_type_ctos = reconcile_cert_type(data, len,
+                                                        sc->client_cert_type, sc->client_cert_type_len,
+                                                        &sc->ext.client_cert_type);
+
+    /* Ignore the error until sending - so we can check cert auth*/
+    return 1;
+}
+
+EXT_RETURN tls_construct_stoc_server_cert_type(SSL_CONNECTION *sc, WPACKET *pkt,
+                                               unsigned int context,
+                                               X509 *x, size_t chainidx)
+{
+    if (sc->ext.server_cert_type == TLSEXT_cert_type_x509) {
+        sc->ext.server_cert_type_ctos = OSSL_CERT_TYPE_CTOS_NONE;
+        return EXT_RETURN_NOT_SENT;
+    }
+    if (sc->ext.server_cert_type_ctos != OSSL_CERT_TYPE_CTOS_GOOD
+            || sc->server_cert_type == NULL) {
+        /* if we don't send it, reset to TLSEXT_cert_type_x509 */
+        sc->ext.server_cert_type_ctos = OSSL_CERT_TYPE_CTOS_NONE;
+        sc->ext.server_cert_type = TLSEXT_cert_type_x509;
+        return EXT_RETURN_NOT_SENT;
+    }
+
+    if (!WPACKET_put_bytes_u16(pkt, TLSEXT_TYPE_server_cert_type)
+            || !WPACKET_start_sub_packet_u16(pkt)
+            || !WPACKET_put_bytes_u8(pkt, sc->ext.server_cert_type)
+            || !WPACKET_close(pkt)) {
+        SSLfatal(sc, SSL_AD_INTERNAL_ERROR, ERR_R_INTERNAL_ERROR);
+        return EXT_RETURN_FAIL;
+    }
+    return EXT_RETURN_SENT;
+}
+
+int tls_parse_ctos_server_cert_type(SSL_CONNECTION *sc, PACKET *pkt,
+                                    unsigned int context,
+                                    X509 *x, size_t chainidx)
+{
+    PACKET supported_cert_types;
+    const unsigned char *data;
+    size_t len;
+
+    /* Ignore the extension */
+    if (sc->server_cert_type == NULL) {
+        sc->ext.server_cert_type_ctos = OSSL_CERT_TYPE_CTOS_NONE;
+        sc->ext.server_cert_type = TLSEXT_cert_type_x509;
+        return 1;
+    }
+
+    if (!PACKET_as_length_prefixed_1(pkt, &supported_cert_types)) {
+        SSLfatal(sc, SSL_AD_DECODE_ERROR, SSL_R_BAD_EXTENSION);
+        return 0;
+    }
+
+    if ((len = PACKET_remaining(&supported_cert_types)) == 0) {
+        SSLfatal(sc, SSL_AD_DECODE_ERROR, SSL_R_BAD_EXTENSION);
+        return 0;
+    }
+    if (!PACKET_get_bytes(&supported_cert_types, &data, len)) {
+        SSLfatal(sc, SSL_AD_DECODE_ERROR, SSL_R_BAD_EXTENSION);
+        return 0;
+    }
+    /* server_cert_type: server (this) has priority */
+    sc->ext.server_cert_type_ctos = reconcile_cert_type(sc->server_cert_type, sc->server_cert_type_len,
+                                                        data, len,
+                                                        &sc->ext.server_cert_type);
+    if (sc->ext.server_cert_type_ctos == OSSL_CERT_TYPE_CTOS_GOOD)
+        return 1;
+
+    /* Did not receive an acceptable cert type */
+    SSLfatal(sc, SSL_AD_UNSUPPORTED_CERTIFICATE, SSL_R_BAD_EXTENSION);
+    return 0;
 }

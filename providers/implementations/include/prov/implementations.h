@@ -185,6 +185,7 @@ extern const OSSL_DISPATCH ossl_sm4128cbc_functions[];
 extern const OSSL_DISPATCH ossl_sm4128ctr_functions[];
 extern const OSSL_DISPATCH ossl_sm4128ofb128_functions[];
 extern const OSSL_DISPATCH ossl_sm4128cfb128_functions[];
+extern const OSSL_DISPATCH ossl_sm4128xts_functions[];
 #endif /* OPENSSL_NO_SM4 */
 #ifndef OPENSSL_NO_RC5
 extern const OSSL_DISPATCH ossl_rc5128ecb_functions[];
@@ -278,6 +279,12 @@ extern const OSSL_DISPATCH ossl_kdf_x963_kdf_functions[];
 extern const OSSL_DISPATCH ossl_kdf_kbkdf_functions[];
 extern const OSSL_DISPATCH ossl_kdf_x942_kdf_functions[];
 extern const OSSL_DISPATCH ossl_kdf_krb5kdf_functions[];
+extern const OSSL_DISPATCH ossl_kdf_hmac_drbg_functions[];
+#ifndef OPENSSL_NO_ARGON2
+extern const OSSL_DISPATCH ossl_kdf_argon2i_functions[];
+extern const OSSL_DISPATCH ossl_kdf_argon2d_functions[];
+extern const OSSL_DISPATCH ossl_kdf_argon2id_functions[];
+#endif
 
 /* RNGs */
 extern const OSSL_DISPATCH ossl_test_rng_functions[];
@@ -334,6 +341,8 @@ extern const OSSL_DISPATCH ossl_sm2_asym_cipher_functions[];
 
 /* Asym Key encapsulation  */
 extern const OSSL_DISPATCH ossl_rsa_asym_kem_functions[];
+extern const OSSL_DISPATCH ossl_ecx_asym_kem_functions[];
+extern const OSSL_DISPATCH ossl_ec_asym_kem_functions[];
 
 /* Encoders */
 extern const OSSL_DISPATCH ossl_rsa_to_PKCS1_der_encoder_functions[];
@@ -526,3 +535,4 @@ extern const OSSL_DISPATCH ossl_SubjectPublicKeyInfo_der_to_der_decoder_function
 extern const OSSL_DISPATCH ossl_pem_to_der_decoder_functions[];
 
 extern const OSSL_DISPATCH ossl_file_store_functions[];
+extern const OSSL_DISPATCH ossl_winstore_store_functions[];

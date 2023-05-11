@@ -387,7 +387,7 @@ static int default_fixup_args(enum state state,
 {
     int ret;
 
-    if ((ret = default_check(state, translation, ctx)) < 0)
+    if ((ret = default_check(state, translation, ctx)) <= 0)
         return ret;
 
     switch (state) {
@@ -458,11 +458,9 @@ static int default_fixup_args(enum state state,
             if (ctx->p2 != NULL) {
                 if (ctx->action_type == SET) {
                     ctx->buflen = BN_num_bytes(ctx->p2);
-                    if ((ctx->allocated_buf =
-                         OPENSSL_malloc(ctx->buflen)) == NULL) {
-                        ERR_raise(ERR_LIB_EVP, ERR_R_MALLOC_FAILURE);
+                    if ((ctx->allocated_buf
+                         = OPENSSL_malloc(ctx->buflen)) == NULL)
                         return 0;
-                    }
                     if (BN_bn2nativepad(ctx->p2,
                                          ctx->allocated_buf, ctx->buflen) < 0) {
                         OPENSSL_free(ctx->allocated_buf);
@@ -1136,6 +1134,7 @@ static int fix_ec_paramgen_curve_nid(enum state state,
                                      const struct translation_st *translation,
                                      struct translation_ctx_st *ctx)
 {
+    char *p2 = NULL;
     int ret;
 
     if ((ret = default_check(state, translation, ctx)) <= 0)
@@ -1148,13 +1147,25 @@ static int fix_ec_paramgen_curve_nid(enum state state,
     if (state == PRE_CTRL_TO_PARAMS) {
         ctx->p2 = (char *)OBJ_nid2sn(ctx->p1);
         ctx->p1 = 0;
+    } else if (state == PRE_PARAMS_TO_CTRL) {
+        /*
+         * We're translating from params to ctrl and setting the curve name.
+         * The ctrl function needs it to be a NID, but meanwhile, we need
+         * space to get the curve name from the param.  |ctx->name_buf| is
+         * sufficient for that.
+         * The double indirection is necessary for default_fixup_args()'s
+         * call of OSSL_PARAM_get_utf8_string() to be done correctly.
+         */
+        p2 = ctx->name_buf;
+        ctx->p2 = &p2;
+        ctx->sz = sizeof(ctx->name_buf);
     }
 
     if ((ret = default_fixup_args(state, translation, ctx)) <= 0)
         return ret;
 
     if (state == PRE_PARAMS_TO_CTRL) {
-        ctx->p1 = OBJ_sn2nid(ctx->p2);
+        ctx->p1 = OBJ_sn2nid(p2);
         ctx->p2 = NULL;
     }
 
@@ -1644,6 +1655,64 @@ static int get_payload_public_key(enum state state,
     return ret;
 }
 
+static int get_payload_public_key_ec(enum state state,
+                                     const struct translation_st *translation,
+                                     struct translation_ctx_st *ctx)
+{
+#ifndef OPENSSL_NO_EC
+    EVP_PKEY *pkey = ctx->p2;
+    const EC_KEY *eckey = EVP_PKEY_get0_EC_KEY(pkey);
+    BN_CTX *bnctx;
+    const EC_POINT *point;
+    const EC_GROUP *ecg;
+    BIGNUM *x = NULL;
+    BIGNUM *y = NULL;
+    int ret = 0;
+
+    ctx->p2 = NULL;
+
+    if (eckey == NULL) {
+        ERR_raise(ERR_LIB_EVP, EVP_R_UNSUPPORTED_KEY_TYPE);
+        return 0;
+    }
+
+    bnctx = BN_CTX_new_ex(ossl_ec_key_get_libctx(eckey));
+    if (bnctx == NULL)
+        return 0;
+
+    point = EC_KEY_get0_public_key(eckey);
+    ecg = EC_KEY_get0_group(eckey);
+
+    /* Caller should have requested a BN, fail if not */
+    if (ctx->params->data_type != OSSL_PARAM_UNSIGNED_INTEGER)
+        goto out;
+
+    x = BN_CTX_get(bnctx);
+    y = BN_CTX_get(bnctx);
+    if (y == NULL)
+        goto out;
+
+    if (!EC_POINT_get_affine_coordinates(ecg, point, x, y, bnctx))
+        goto out;
+
+    if (strncmp(ctx->params->key, OSSL_PKEY_PARAM_EC_PUB_X, 2) == 0)
+        ctx->p2 = x;
+    else if (strncmp(ctx->params->key, OSSL_PKEY_PARAM_EC_PUB_Y, 2) == 0)
+        ctx->p2 = y;
+    else
+        goto out;
+
+    /* Return the payload */
+    ret = default_fixup_args(state, translation, ctx);
+out:
+    BN_CTX_free(bnctx);
+    return ret;
+#else
+    ERR_raise(ERR_LIB_EVP, EVP_R_UNSUPPORTED_KEY_TYPE);
+    return 0;
+#endif
+}
+
 static int get_payload_bn(enum state state,
                           const struct translation_st *translation,
                           struct translation_ctx_st *ctx, const BIGNUM *bn)
@@ -1955,6 +2024,32 @@ IMPL_GET_RSA_PAYLOAD_COEFFICIENT(7)
 IMPL_GET_RSA_PAYLOAD_COEFFICIENT(8)
 IMPL_GET_RSA_PAYLOAD_COEFFICIENT(9)
 
+static int fix_group_ecx(enum state state,
+                         const struct translation_st *translation,
+                         struct translation_ctx_st *ctx)
+{
+    const char *value = NULL;
+
+    switch (state) {
+    case PRE_PARAMS_TO_CTRL:
+        if (!EVP_PKEY_CTX_IS_GEN_OP(ctx->pctx))
+            return 0;
+        ctx->action_type = NONE;
+        return 1;
+    case POST_PARAMS_TO_CTRL:
+        if (OSSL_PARAM_get_utf8_string_ptr(ctx->params, &value) == 0 ||
+            OPENSSL_strcasecmp(ctx->pctx->keytype, value) != 0) {
+            ERR_raise(ERR_LIB_EVP, ERR_R_PASSED_INVALID_ARGUMENT);
+            ctx->p1 = 0;
+            return 0;
+        }
+        ctx->p1 = 1;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 /*-
  * The translation table itself
  * ============================
@@ -2177,6 +2272,12 @@ static const struct translation_st evp_pkey_ctx_translations[] = {
       EVP_PKEY_CTRL_GET_RSA_OAEP_LABEL, NULL, NULL,
       OSSL_ASYM_CIPHER_PARAM_OAEP_LABEL, OSSL_PARAM_OCTET_STRING, NULL },
 
+    { SET, EVP_PKEY_RSA, 0, EVP_PKEY_OP_TYPE_CRYPT,
+      EVP_PKEY_CTRL_RSA_IMPLICIT_REJECTION, NULL,
+      "rsa_pkcs1_implicit_rejection",
+      OSSL_ASYM_CIPHER_PARAM_IMPLICIT_REJECTION, OSSL_PARAM_UNSIGNED_INTEGER,
+      NULL },
+
     { SET, EVP_PKEY_RSA_PSS, 0, EVP_PKEY_OP_TYPE_GEN,
       EVP_PKEY_CTRL_MD, "rsa_pss_keygen_md", NULL,
       OSSL_ALG_PARAM_DIGEST, OSSL_PARAM_UTF8_STRING, fix_md },
@@ -2274,6 +2375,19 @@ static const struct translation_st evp_pkey_ctx_translations[] = {
     { GET, -1, -1, EVP_PKEY_OP_TYPE_SIG,
       EVP_PKEY_CTRL_GET_MD, NULL, NULL,
       OSSL_SIGNATURE_PARAM_DIGEST, OSSL_PARAM_UTF8_STRING, fix_md },
+
+    /*-
+     * ECX
+     * ===
+     */
+    { SET, EVP_PKEY_X25519, EVP_PKEY_X25519, EVP_PKEY_OP_KEYGEN, -1, NULL, NULL,
+      OSSL_PKEY_PARAM_GROUP_NAME, OSSL_PARAM_UTF8_STRING, fix_group_ecx },
+    { SET, EVP_PKEY_X25519, EVP_PKEY_X25519, EVP_PKEY_OP_PARAMGEN, -1, NULL, NULL,
+      OSSL_PKEY_PARAM_GROUP_NAME, OSSL_PARAM_UTF8_STRING, fix_group_ecx },
+    { SET, EVP_PKEY_X448, EVP_PKEY_X448, EVP_PKEY_OP_KEYGEN, -1, NULL, NULL,
+      OSSL_PKEY_PARAM_GROUP_NAME, OSSL_PARAM_UTF8_STRING, fix_group_ecx },
+    { SET, EVP_PKEY_X448, EVP_PKEY_X448, EVP_PKEY_OP_PARAMGEN, -1, NULL, NULL,
+      OSSL_PKEY_PARAM_GROUP_NAME, OSSL_PARAM_UTF8_STRING, fix_group_ecx },
 };
 
 static const struct translation_st evp_pkey_translations[] = {
@@ -2295,6 +2409,12 @@ static const struct translation_st evp_pkey_translations[] = {
       OSSL_PKEY_PARAM_PUB_KEY,
       0 /* no data type, let get_payload_public_key() handle that */,
       get_payload_public_key },
+    { GET, -1, -1, -1, 0, NULL, NULL,
+        OSSL_PKEY_PARAM_EC_PUB_X, OSSL_PARAM_UNSIGNED_INTEGER,
+        get_payload_public_key_ec },
+    { GET, -1, -1, -1, 0, NULL, NULL,
+        OSSL_PKEY_PARAM_EC_PUB_Y, OSSL_PARAM_UNSIGNED_INTEGER,
+        get_payload_public_key_ec },
 
     /* DH and DSA */
     { GET, -1, -1, -1, 0, NULL, NULL,
@@ -2485,7 +2605,7 @@ lookup_translation(struct translation_st *tmpl,
             tmpl->ctrl_hexstr = ctrl_hexstr;
         } else if (tmpl->param_key != NULL) {
             /*
-             * Search criteria that originates from a OSSL_PARAM setter or
+             * Search criteria that originates from an OSSL_PARAM setter or
              * getter.
              *
              * Ctrls were fundamentally bidirectional, with only the ctrl
@@ -2686,13 +2806,14 @@ static int evp_pkey_ctx_setget_params_to_ctrl(EVP_PKEY_CTX *pctx,
             if (translation->fixup_args != NULL)
                 fixup = translation->fixup_args;
             ctx.action_type = translation->action_type;
+            ctx.ctrl_cmd = translation->ctrl_num;
         }
         ctx.pctx = pctx;
         ctx.params = params;
 
         ret = fixup(PRE_PARAMS_TO_CTRL, translation, &ctx);
 
-        if (ret > 0 && action_type != NONE)
+        if (ret > 0 && ctx.action_type != NONE)
             ret = EVP_PKEY_CTX_ctrl(pctx, keytype, optype,
                                     ctx.ctrl_cmd, ctx.p1, ctx.p2);
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2015-2018 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2022 The OpenSSL Project Authors. All Rights Reserved.
  *
  * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
@@ -9,6 +9,7 @@
 
 #include "internal/packet.h"
 #include "internal/quic_wire.h"
+#include "internal/quic_wire_pkt.h"
 #include "testutil.h"
 
 struct encode_test_case {
@@ -118,9 +119,17 @@ static int encode_case_3_dec(PACKET *pkt, ossl_ssize_t fail)
     if (!TEST_uint64_t_eq(total_ranges, peek_total_ranges))
         return 0;
 
-    if (!TEST_mem_eq(f.ack_ranges, f.num_ack_ranges * sizeof(OSSL_QUIC_ACK_RANGE),
+    if (!TEST_uint64_t_le(f.num_ack_ranges * sizeof(OSSL_QUIC_ACK_RANGE),
+                          SIZE_MAX)
+        || !TEST_uint64_t_le(encode_case_3_f.num_ack_ranges
+                             * sizeof(OSSL_QUIC_ACK_RANGE),
+                             SIZE_MAX))
+        return 0;
+
+    if (!TEST_mem_eq(f.ack_ranges,
+                     (size_t)f.num_ack_ranges * sizeof(OSSL_QUIC_ACK_RANGE),
                      encode_case_3_f.ack_ranges,
-                     encode_case_3_f.num_ack_ranges * sizeof(OSSL_QUIC_ACK_RANGE)))
+                     (size_t)encode_case_3_f.num_ack_ranges * sizeof(OSSL_QUIC_ACK_RANGE)))
         return 0;
 
     if (!TEST_uint64_t_eq(ossl_time2ticks(f.delay_time),
@@ -261,7 +270,11 @@ static int encode_case_6_dec(PACKET *pkt, ossl_ssize_t fail)
     if (!TEST_uint64_t_eq(f.offset, 0x1234))
         return 0;
 
-    if (!TEST_mem_eq(f.data, f.len, encode_case_6_data, sizeof(encode_case_6_data)))
+    if (!TEST_uint64_t_le(f.len, SIZE_MAX))
+        return 0;
+
+    if (!TEST_mem_eq(f.data, (size_t)f.len,
+                     encode_case_6_data, sizeof(encode_case_6_data)))
         return 0;
 
     return 1;
@@ -351,7 +364,10 @@ static int encode_case_8_dec(PACKET *pkt, ossl_ssize_t fail)
     if (fail >= 0)
         return 1;
 
-    if (!TEST_mem_eq(f.data, f.len,
+    if (!TEST_uint64_t_le(f.len, SIZE_MAX))
+        return 0;
+
+    if (!TEST_mem_eq(f.data, (size_t)f.len,
                      encode_case_8_data, sizeof(encode_case_8_data)))
         return 0;
 
@@ -403,7 +419,10 @@ static int encode_case_9_dec(PACKET *pkt, ossl_ssize_t fail)
     if (fail >= 0)
         return 1;
 
-    if (!TEST_mem_eq(f.data, f.len,
+    if (!TEST_uint64_t_le(f.len, SIZE_MAX))
+        return 0;
+
+    if (!TEST_mem_eq(f.data, (size_t)f.len,
                      encode_case_9_data, sizeof(encode_case_9_data)))
         return 0;
 
@@ -867,7 +886,7 @@ static const OSSL_QUIC_FRAME_CONN_CLOSE encode_case_20_f = {
     0,
     0x1234,
     0x9781,
-    encode_case_20_reason,
+    (char *)encode_case_20_reason,
     sizeof(encode_case_20_reason)
 };
 
@@ -1357,9 +1376,127 @@ err:
     return testresult;
 }
 
+/* Packet Header PN Encoding Tests */
+struct pn_test {
+    QUIC_PN         pn, tx_largest_acked, rx_largest_pn;
+    char            expected_len;
+    unsigned char   expected_bytes[4];
+};
+
+static const struct pn_test pn_tests[] = {
+    /* RFC 9000 Section A.2 */
+    { 0xac5c02, 0xabe8b3, 0xabe8b3, 2, {0x5c,0x02} },
+    { 0xace8fe, 0xabe8b3, 0xabe8b3, 3, {0xac,0xe8,0xfe} },
+    /* RFC 9000 Section A.3 */
+    { 0xa82f9b32, 0xa82f30ea, 0xa82f30ea, 2, {0x9b,0x32} },
+    /* Boundary Cases */
+    { 1, 0, 0, 1, {0x01} },
+    { 256, 255, 255, 1, {0x00} },
+    { 257, 255, 255, 1, {0x01} },
+    { 256, 128, 128, 1, {0x00} },
+    { 256, 127, 127, 2, {0x01,0x00} },
+    { 65536, 32768, 32768, 2, {0x00,0x00} },
+    { 65537, 32769, 32769, 2, {0x00,0x01} },
+    { 65536, 32767, 32767, 3, {0x01,0x00,0x00} },
+    { 65537, 32768, 32768, 3, {0x01,0x00,0x01} },
+    { 16777216, 8388608, 8388608, 3, {0x00,0x00,0x00} },
+    { 16777217, 8388609, 8388609, 3, {0x00,0x00,0x01} },
+    { 16777216, 8388607, 8388607, 4, {0x01,0x00,0x00,0x00} },
+    { 16777217, 8388608, 8388608, 4, {0x01,0x00,0x00,0x01} },
+    { 4294967296, 2147483648, 2147483648, 4, {0x00,0x00,0x00,0x00} },
+    { 4294967297, 2147483648, 2147483648, 4, {0x00,0x00,0x00,0x01} },
+};
+
+static int test_wire_pkt_hdr_pn(int tidx)
+{
+    int testresult = 0;
+    const struct pn_test *t = &pn_tests[tidx];
+    unsigned char buf[4];
+    int pn_len;
+    QUIC_PN res_pn;
+
+    pn_len = ossl_quic_wire_determine_pn_len(t->pn, t->tx_largest_acked);
+    if (!TEST_int_eq(pn_len, (int)t->expected_len))
+        goto err;
+
+    if (!TEST_true(ossl_quic_wire_encode_pkt_hdr_pn(t->pn, buf, pn_len)))
+        goto err;
+
+    if (!TEST_mem_eq(t->expected_bytes, t->expected_len, buf, pn_len))
+        goto err;
+
+    if (!TEST_true(ossl_quic_wire_decode_pkt_hdr_pn(buf, pn_len,
+                                                    t->rx_largest_pn, &res_pn)))
+        goto err;
+
+    if (!TEST_uint64_t_eq(res_pn, t->pn))
+        goto err;
+
+    testresult = 1;
+err:
+    return testresult;
+}
+
+/* RFC 9001 s. A.4 */
+static const QUIC_CONN_ID retry_orig_dcid = {
+    8, { 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08 }
+};
+
+static const unsigned char retry_encoded[] = {
+  0xff,                                                 /* Long Header, Retry */
+  0x00, 0x00, 0x00, 0x01,                               /* Version 1 */
+  0x00,                                                 /* DCID */
+  0x08, 0xf0, 0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62, 0xb5, /* SCID */
+
+  /* Retry Token */
+  0x74, 0x6f, 0x6b, 0x65, 0x6e,
+
+  /* Retry Integrity Tag */
+  0x04, 0xa2, 0x65, 0xba, 0x2e, 0xff, 0x4d, 0x82, 0x90, 0x58, 0xfb, 0x3f, 0x0f,
+  0x24, 0x96, 0xba
+};
+
+static int test_wire_retry_integrity_tag(void)
+{
+    int testresult = 0;
+    PACKET pkt = {0};
+    QUIC_PKT_HDR hdr = {0};
+    unsigned char got_tag[QUIC_RETRY_INTEGRITY_TAG_LEN] = {0};
+
+    if (!TEST_true(PACKET_buf_init(&pkt, retry_encoded, sizeof(retry_encoded))))
+        goto err;
+
+    if (!TEST_true(ossl_quic_wire_decode_pkt_hdr(&pkt, 0, 0, &hdr, NULL)))
+        goto err;
+
+    if (!TEST_int_eq(hdr.type, QUIC_PKT_TYPE_RETRY))
+        goto err;
+
+    if (!TEST_true(ossl_quic_calculate_retry_integrity_tag(NULL, NULL, &hdr,
+                                                           &retry_orig_dcid,
+                                                           got_tag)))
+        goto err;
+
+    if (!TEST_mem_eq(got_tag, sizeof(got_tag),
+                     retry_encoded + sizeof(retry_encoded)
+                        - QUIC_RETRY_INTEGRITY_TAG_LEN,
+                     QUIC_RETRY_INTEGRITY_TAG_LEN))
+        goto err;
+
+    if (!TEST_true(ossl_quic_validate_retry_integrity_tag(NULL, NULL, &hdr,
+                                                          &retry_orig_dcid)))
+        goto err;
+
+    testresult = 1;
+err:
+    return testresult;
+}
+
 int setup_tests(void)
 {
-    ADD_ALL_TESTS(test_wire_encode, OSSL_NELEM(encode_cases));
-    ADD_ALL_TESTS(test_wire_ack,    OSSL_NELEM(ack_cases));
+    ADD_ALL_TESTS(test_wire_encode,     OSSL_NELEM(encode_cases));
+    ADD_ALL_TESTS(test_wire_ack,        OSSL_NELEM(ack_cases));
+    ADD_ALL_TESTS(test_wire_pkt_hdr_pn, OSSL_NELEM(pn_tests));
+    ADD_TEST(test_wire_retry_integrity_tag);
     return 1;
 }

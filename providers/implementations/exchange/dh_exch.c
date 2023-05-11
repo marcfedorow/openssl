@@ -194,10 +194,8 @@ static int dh_X9_42_kdf_derive(void *vpdhctx, unsigned char *secret,
     }
     if (!dh_plain_derive(pdhctx, NULL, &stmplen, 0, 1))
         return 0;
-    if ((stmp = OPENSSL_secure_malloc(stmplen)) == NULL) {
-        ERR_raise(ERR_LIB_PROV, ERR_R_MALLOC_FAILURE);
+    if ((stmp = OPENSSL_secure_malloc(stmplen)) == NULL)
         return 0;
-    }
     if (!dh_plain_derive(pdhctx, stmp, &stmplen, stmplen, 1))
         goto err;
 
@@ -509,5 +507,5 @@ const OSSL_DISPATCH ossl_dh_keyexch_functions[] = {
     { OSSL_FUNC_KEYEXCH_GET_CTX_PARAMS, (void (*)(void))dh_get_ctx_params },
     { OSSL_FUNC_KEYEXCH_GETTABLE_CTX_PARAMS,
       (void (*)(void))dh_gettable_ctx_params },
-    { 0, NULL }
+    OSSL_DISPATCH_END
 };

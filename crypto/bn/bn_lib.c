@@ -244,10 +244,8 @@ BIGNUM *BN_new(void)
 {
     BIGNUM *ret;
 
-    if ((ret = OPENSSL_zalloc(sizeof(*ret))) == NULL) {
-        ERR_raise(ERR_LIB_BN, ERR_R_MALLOC_FAILURE);
+    if ((ret = OPENSSL_zalloc(sizeof(*ret))) == NULL)
         return NULL;
-    }
     ret->flags = BN_FLG_MALLOCED;
     bn_check_top(ret);
     return ret;
@@ -279,10 +277,8 @@ static BN_ULONG *bn_expand_internal(const BIGNUM *b, int words)
         a = OPENSSL_secure_zalloc(words * sizeof(*a));
     else
         a = OPENSSL_zalloc(words * sizeof(*a));
-    if (a == NULL) {
-        ERR_raise(ERR_LIB_BN, ERR_R_MALLOC_FAILURE);
+    if (a == NULL)
         return NULL;
-    }
 
     assert(b->top <= words);
     if (b->top > 0)
@@ -430,11 +426,11 @@ int BN_set_word(BIGNUM *a, BN_ULONG w)
     return 1;
 }
 
-typedef enum {BIG, LITTLE} endianess_t;
+typedef enum {BIG, LITTLE} endianness_t;
 typedef enum {SIGNED, UNSIGNED} signedness_t;
 
 static BIGNUM *bin2bn(const unsigned char *s, int len, BIGNUM *ret,
-                      endianess_t endianess, signedness_t signedness)
+                      endianness_t endianness, signedness_t signedness)
 {
     int inc;
     const unsigned char *s2;
@@ -444,6 +440,10 @@ static BIGNUM *bin2bn(const unsigned char *s, int len, BIGNUM *ret,
     unsigned int n;
     BIGNUM *bn = NULL;
 
+    /* Negative length is not acceptable */
+    if (len < 0)
+        return NULL;
+
     if (ret == NULL)
         ret = bn = BN_new();
     if (ret == NULL)
@@ -451,11 +451,20 @@ static BIGNUM *bin2bn(const unsigned char *s, int len, BIGNUM *ret,
     bn_check_top(ret);
 
     /*
+     * If the input has no bits, the number is considered zero.
+     * This makes calls with s==NULL and len==0 safe.
+     */
+    if (len == 0) {
+        BN_clear(ret);
+        return ret;
+    }
+
+    /*
      * The loop that does the work iterates from least to most
      * significant BIGNUM chunk, so we adapt parameters to transfer
      * input bytes accordingly.
      */
-    if (endianess == LITTLE) {
+    if (endianness == LITTLE) {
         s2 = s + len - 1;
         inc2 = -1;
         inc = 1;
@@ -533,7 +542,7 @@ BIGNUM *BN_signed_bin2bn(const unsigned char *s, int len, BIGNUM *ret)
 }
 
 static int bn2binpad(const BIGNUM *a, unsigned char *to, int tolen,
-                     endianess_t endianess, signedness_t signedness)
+                     endianness_t endianness, signedness_t signedness)
 {
     int inc;
     int n, n8;
@@ -590,7 +599,7 @@ static int bn2binpad(const BIGNUM *a, unsigned char *to, int tolen,
      * to most significant BIGNUM limb, so we adapt parameters to
      * transfer output bytes accordingly.
      */
-    if (endianess == LITTLE) {
+    if (endianness == LITTLE) {
         inc = 1;
     } else {
         inc = -1;
@@ -1044,10 +1053,8 @@ BN_GENCB *BN_GENCB_new(void)
 {
     BN_GENCB *ret;
 
-    if ((ret = OPENSSL_malloc(sizeof(*ret))) == NULL) {
-        ERR_raise(ERR_LIB_BN, ERR_R_MALLOC_FAILURE);
+    if ((ret = OPENSSL_malloc(sizeof(*ret))) == NULL)
         return NULL;
-    }
 
     return ret;
 }
@@ -1097,6 +1104,28 @@ void *BN_GENCB_get_arg(BN_GENCB *cb)
 BIGNUM *bn_wexpand(BIGNUM *a, int words)
 {
     return (words <= a->dmax) ? a : bn_expand2(a, words);
+}
+
+void bn_correct_top_consttime(BIGNUM *a)
+{
+    int j, atop;
+    BN_ULONG limb;
+    unsigned int mask;
+
+    for (j = 0, atop = 0; j < a->dmax; j++) {
+        limb = a->d[j];
+        limb |= 0 - limb;
+        limb >>= BN_BITS2 - 1;
+        limb = 0 - limb;
+        mask = (unsigned int)limb;
+        mask &= constant_time_msb(j - a->top);
+        atop = constant_time_select_int(mask, j + 1, atop);
+    }
+
+    mask = constant_time_eq_int(atop, 0);
+    a->top = atop;
+    a->neg = constant_time_select_int(mask, 0, a->neg);
+    a->flags &= ~BN_FLG_FIXED_TOP;
 }
 
 void bn_correct_top(BIGNUM *a)

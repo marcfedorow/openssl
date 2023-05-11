@@ -65,19 +65,15 @@ static void *ossl_aes_gcm_siv_dupctx(void *vctx)
         return NULL;
 
     ret = OPENSSL_memdup(in, sizeof(*in));
-    if (ret == NULL) {
-        ERR_raise(ERR_LIB_PROV, ERR_R_MALLOC_FAILURE);
+    if (ret == NULL)
         return NULL;
-    }
     /* NULL-out these things we create later */
     ret->aad = NULL;
     ret->ecb_ctx = NULL;
 
     if (in->aad == NULL) {
-        if ((ret->aad = OPENSSL_memdup(in->aad, UP16(ret->aad_len))) == NULL) {
-            ERR_raise(ERR_LIB_PROV, ERR_R_MALLOC_FAILURE);
+        if ((ret->aad = OPENSSL_memdup(in->aad, UP16(ret->aad_len))) == NULL)
             goto err;
-        }
     }
 
     if (!in->hw->dup_ctx(ret, in))
@@ -319,7 +315,7 @@ const OSSL_DISPATCH ossl_##alg##kbits##lc##_functions[] = {                     
     { OSSL_FUNC_CIPHER_GETTABLE_CTX_PARAMS, (void (*)(void))ossl_##alg##_##lc##_gettable_ctx_params },  \
     { OSSL_FUNC_CIPHER_SET_CTX_PARAMS,      (void (*)(void))ossl_##alg##_##lc##_set_ctx_params },       \
     { OSSL_FUNC_CIPHER_SETTABLE_CTX_PARAMS, (void (*)(void))ossl_##alg##_##lc##_settable_ctx_params },  \
-    { 0, NULL }                                                                                         \
+    OSSL_DISPATCH_END                                                                                   \
 }
 
 IMPLEMENT_cipher(aes, gcm_siv, GCM_SIV, AEAD_FLAGS, 128, 8, 96);
